@@ -24,7 +24,7 @@
           sha256 = "sha256-sqSWJDUxc+zaz1nBWMAJKTAGBuGWP25GCftIOlCEAtA=";
         };
         zellij = pkgs.zellij.unwrapped.overrideAttrs {
-          version = "0.45.0-fix-slow-attach";
+          version = "0.45.0";
           src = ./.;
           cargoDeps = pkgs.rustPlatform.fetchCargoVendor {
             src = ./.;
