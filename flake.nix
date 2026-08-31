@@ -24,12 +24,18 @@
           sha256 = "sha256-sqSWJDUxc+zaz1nBWMAJKTAGBuGWP25GCftIOlCEAtA=";
         };
         zellij = pkgs.zellij.unwrapped.overrideAttrs {
-          version = "0.45.0";
+          version = "0.46.0";
           src = ./.;
           cargoDeps = pkgs.rustPlatform.fetchCargoVendor {
             src = ./.;
-            hash = "sha256-KAmj4KSL80FM6OQiKPFJ82njgnQYrph0IMesCBw4SM4=";
+            hash = "sha256-lOwmzZZPjit1Hh7/TFZEuUcqBKdZGtvoKT6u6nNxm+Y=";
           };
+          postInstall = ''
+            installShellCompletion --cmd zellij \
+              --bash <($out/bin/zellij setup --generate-completion bash) \
+              --fish <($out/bin/zellij setup --generate-completion fish) \
+              --zsh <($out/bin/zellij setup --generate-completion zsh)
+          '';
         };
       in
       {
