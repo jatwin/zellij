@@ -666,28 +666,40 @@ impl ServerOsApi for ServerOsInputOutput {
             return HashMap::new();
         }
 
-        let sysinfo_pids: Vec<sysinfo::Pid> = terminal_to_fg_pid
-            .values()
-            .map(|&p| sysinfo::Pid::from_u32(p))
-            .collect();
-        let mut system_info = System::new();
-        let refresh_kind = ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always);
-        system_info.refresh_processes_specifics(
-            ProcessesToUpdate::Some(&sysinfo_pids),
-            false,
-            refresh_kind,
-        );
+        #[cfg(not(target_os = "linux"))]
+        let system_info = {
+            let sysinfo_pids: Vec<sysinfo::Pid> = terminal_to_fg_pid
+                .values()
+                .map(|&p| sysinfo::Pid::from_u32(p))
+                .collect();
+            let mut system_info = System::new();
+            let refresh_kind = ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always);
+            system_info.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&sysinfo_pids),
+                false,
+                refresh_kind,
+            );
+            system_info
+        };
 
         let mut cmds = HashMap::new();
         for (terminal_id, fg_pid) in terminal_to_fg_pid {
-            let Some(process) = system_info.process(sysinfo::Pid::from_u32(fg_pid)) else {
-                continue;
+            #[cfg(target_os = "linux")]
+            let command = match linux_process::get_cmd(std::path::Path::new("/proc"), fg_pid) {
+                Some(command) => command,
+                None => continue,
             };
-            let command: Vec<String> = process
-                .cmd()
-                .iter()
-                .map(|s| s.to_string_lossy().into_owned())
-                .collect();
+            #[cfg(not(target_os = "linux"))]
+            let command: Vec<String> = {
+                let Some(process) = system_info.process(sysinfo::Pid::from_u32(fg_pid)) else {
+                    continue;
+                };
+                process
+                    .cmd()
+                    .iter()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .collect()
+            };
             if command.is_empty() {
                 continue;
             }

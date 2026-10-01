@@ -24,24 +24,32 @@ pub(super) fn get_cwds(
         if let Some(cwd) = get_cwd(proc_root, pid) {
             cwds.insert(pid, cwd);
         }
-        match fs::read(proc_root.join(pid.to_string()).join("cmdline")) {
-            Ok(cmdline) => {
-                let cmd: Vec<String> = cmdline
-                    .split(|byte| *byte == 0)
-                    .map(|argument| argument.trim_ascii())
-                    .filter(|argument| !argument.is_empty())
-                    .map(|argument| String::from_utf8_lossy(argument).into_owned())
-                    .collect();
-                if !cmd.is_empty() {
-                    cmds.insert(pid, cmd);
-                }
-            },
-            Err(error) => {
-                log::debug!("Failed to read cmdline for process {pid}: {error}");
-            },
+        if let Some(cmd) = get_cmd(proc_root, pid) {
+            cmds.insert(pid, cmd);
         }
     }
     (cwds, cmds)
+}
+
+pub(super) fn get_cmd(proc_root: &Path, pid: u32) -> Option<Vec<String>> {
+    match fs::read(proc_root.join(pid.to_string()).join("cmdline")) {
+        Ok(cmdline) => {
+            let cmd: Vec<String> = cmdline
+                .split(|byte| *byte == 0)
+                .map(|argument| argument.trim_ascii())
+                .filter(|argument| !argument.is_empty())
+                .map(|argument| String::from_utf8_lossy(argument).into_owned())
+                .collect();
+            match cmd.is_empty() {
+                true => None,
+                false => Some(cmd),
+            }
+        },
+        Err(error) => {
+            log::debug!("Failed to read cmdline for process {pid}: {error}");
+            None
+        },
+    }
 }
 
 #[cfg(test)]

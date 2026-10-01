@@ -21,14 +21,14 @@
         pkgs = import nixpkgs { inherit system; };
         rustToolchain = fenix.packages.${system}.fromToolchainFile {
           file = ./rust-toolchain.toml;
-          sha256 = "sha256-sqSWJDUxc+zaz1nBWMAJKTAGBuGWP25GCftIOlCEAtA=";
+          sha256 = "sha256-gh/xTkxKHL4eiRXzWv8KP7vfjSk61Iq48x47BEDFgfk=";
         };
         zellij = pkgs.zellij.unwrapped.overrideAttrs {
           version = "0.46.0";
           src = ./.;
           cargoDeps = pkgs.rustPlatform.fetchCargoVendor {
             src = ./.;
-            hash = "sha256-lOwmzZZPjit1Hh7/TFZEuUcqBKdZGtvoKT6u6nNxm+Y=";
+            hash = "sha256-6unom2zFwbFKHyjl9ETRMq7c+qtosgh+/1uLKCvo1WI=";
           };
           postInstall = ''
             installShellCompletion --cmd zellij \
