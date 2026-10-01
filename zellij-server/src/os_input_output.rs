@@ -8,6 +8,7 @@ use crate::os_input_output_unix::UnixPtyBackend as PtyBackendImpl;
 use crate::os_input_output_windows::WindowsPtyBackend as PtyBackendImpl;
 
 use interprocess;
+#[cfg(not(target_os = "linux"))]
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 use tempfile::tempfile;
 use zellij_utils::{
@@ -34,6 +35,10 @@ use std::{
 };
 
 pub use async_trait::async_trait;
+
+#[cfg(target_os = "linux")]
+#[path = "os_input_output/linux_process.rs"]
+mod linux_process;
 
 /// Check whether a candidate path refers to an executable file, considering
 /// PATHEXT extensions on Windows (e.g. `.exe`, `.cmd`).
@@ -491,6 +496,12 @@ impl ServerOsApi for ServerOsInputOutput {
         default_palette()
     }
 
+    #[cfg(target_os = "linux")]
+    fn get_cwd(&self, pid: u32) -> Option<PathBuf> {
+        linux_process::get_cwd(std::path::Path::new("/proc"), pid)
+    }
+
+    #[cfg(not(target_os = "linux"))]
     fn get_cwd(&self, pid: u32) -> Option<PathBuf> {
         let mut system_info = System::new();
         let sysinfo_pid = sysinfo::Pid::from_u32(pid);
@@ -509,6 +520,12 @@ impl ServerOsApi for ServerOsInputOutput {
         None
     }
 
+    #[cfg(target_os = "linux")]
+    fn get_cwds(&self, pids: Vec<u32>) -> (HashMap<u32, PathBuf>, HashMap<u32, Vec<String>>) {
+        linux_process::get_cwds(std::path::Path::new("/proc"), pids)
+    }
+
+    #[cfg(not(target_os = "linux"))]
     fn get_cwds(&self, pids: Vec<u32>) -> (HashMap<u32, PathBuf>, HashMap<u32, Vec<String>>) {
         let mut system_info = System::new();
         let mut cwds = HashMap::new();
