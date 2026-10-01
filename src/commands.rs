@@ -1,16 +1,12 @@
 use dialoguer::Confirm;
 use std::net::IpAddr;
-use std::{fs::File, io::prelude::*, path::PathBuf, process, time::Duration};
+use std::{path::PathBuf, process, time::Duration};
 
 #[cfg(feature = "web_server_capability")]
 use isahc::{config::RedirectPolicy, prelude::*, HttpClient, Request};
 
 use zellij_client::{
-    old_config_converter::{
-        config_yaml_to_config_kdl, convert_old_yaml_files, layout_yaml_to_layout_kdl,
-    },
-    os_input_output::get_client_os_input,
-    start_client as start_client_impl, ClientInfo,
+    os_input_output::get_client_os_input, start_client as start_client_impl, ClientInfo,
 };
 
 use zellij_utils::sessions::{
@@ -18,7 +14,7 @@ use zellij_utils::sessions::{
     generate_unique_session_name, get_active_session, get_resurrectable_sessions, get_sessions,
     get_sessions_sorted_by_mtime, kill_session as kill_session_impl, match_session_name,
     print_sessions, print_sessions_with_index, resurrection_layout, session_exists,
-    validate_session_name, ActiveSession, SessionNameMatch,
+    session_listing_error_message, validate_session_name, ActiveSession, SessionNameMatch,
 };
 
 use zellij_utils::consts::session_layout_cache_file_name;
@@ -41,7 +37,7 @@ use zellij_utils::{
     data::ConnectToSession,
     envs,
     input::{
-        actions::Action,
+        actions::{initial_panes_from_cli, Action},
         config::{Config, ConfigError},
         options::Options,
     },
@@ -233,7 +229,7 @@ pub(crate) fn start_web_server(
 }
 
 fn create_new_client() -> ClientInfo {
-    ClientInfo::New(generate_unique_session_name_or_exit(), None, None)
+    ClientInfo::New(generate_unique_session_name_or_exit(), None, None, None)
 }
 
 #[cfg(feature = "web_server_capability")]
@@ -338,6 +334,7 @@ pub(crate) fn list_auth_tokens() -> Result<Vec<String>, String> {
 }
 
 /// Default timeout for web server status check (in seconds)
+#[cfg(feature = "web_server_capability")]
 pub const DEFAULT_WEB_SERVER_STATUS_TIMEOUT_SECS: u64 = 30;
 
 #[cfg(feature = "web_server_capability")]
@@ -511,75 +508,6 @@ pub(crate) fn subscribe_to_session(
     );
 }
 
-pub(crate) fn convert_old_config_file(old_config_file: PathBuf) {
-    match File::open(&old_config_file) {
-        Ok(mut handle) => {
-            let mut raw_config_file = String::new();
-            let _ = handle.read_to_string(&mut raw_config_file);
-            match config_yaml_to_config_kdl(&raw_config_file, false) {
-                Ok(kdl_config) => {
-                    println!("{}", kdl_config);
-                    process::exit(0);
-                },
-                Err(e) => {
-                    eprintln!("Failed to convert config: {}", e);
-                    process::exit(1);
-                },
-            }
-        },
-        Err(e) => {
-            eprintln!("Failed to open file: {}", e);
-            process::exit(1);
-        },
-    }
-}
-
-pub(crate) fn convert_old_layout_file(old_layout_file: PathBuf) {
-    match File::open(&old_layout_file) {
-        Ok(mut handle) => {
-            let mut raw_layout_file = String::new();
-            let _ = handle.read_to_string(&mut raw_layout_file);
-            match layout_yaml_to_layout_kdl(&raw_layout_file) {
-                Ok(kdl_layout) => {
-                    println!("{}", kdl_layout);
-                    process::exit(0);
-                },
-                Err(e) => {
-                    eprintln!("Failed to convert layout: {}", e);
-                    process::exit(1);
-                },
-            }
-        },
-        Err(e) => {
-            eprintln!("Failed to open file: {}", e);
-            process::exit(1);
-        },
-    }
-}
-
-pub(crate) fn convert_old_theme_file(old_theme_file: PathBuf) {
-    match File::open(&old_theme_file) {
-        Ok(mut handle) => {
-            let mut raw_config_file = String::new();
-            let _ = handle.read_to_string(&mut raw_config_file);
-            match config_yaml_to_config_kdl(&raw_config_file, true) {
-                Ok(kdl_config) => {
-                    println!("{}", kdl_config);
-                    process::exit(0);
-                },
-                Err(e) => {
-                    eprintln!("Failed to convert config: {}", e);
-                    process::exit(1);
-                },
-            }
-        },
-        Err(e) => {
-            eprintln!("Failed to open file: {}", e);
-            process::exit(1);
-        },
-    }
-}
-
 fn attach_with_cli_client(
     cli_action: zellij_utils::cli::CliAction,
     session_name: &str,
@@ -589,8 +517,12 @@ fn attach_with_cli_client(
     let get_current_dir = || std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     match Action::actions_from_cli(cli_action, Box::new(get_current_dir), config) {
         Ok(actions) => {
-            zellij_client::cli_client::start_cli_client(Box::new(os_input), session_name, actions);
-            std::process::exit(0);
+            let exit_status = zellij_client::cli_client::start_cli_client(
+                Box::new(os_input),
+                session_name,
+                actions,
+            );
+            std::process::exit(exit_status);
         },
         Err(e) => {
             eprintln!("{}", e);
@@ -625,18 +557,19 @@ fn attach_with_session_name(
     create: bool,
 ) -> ClientInfo {
     match &session_name {
-        Some(session) if create => {
-            if session_exists(session).unwrap() {
-                ClientInfo::Attach(session_name.unwrap(), config_options)
-            } else {
-                ClientInfo::New(session_name.unwrap(), None, None)
-            }
+        Some(session) if create => match session_exists(session) {
+            Ok(true) => ClientInfo::Attach(session_name.unwrap(), config_options),
+            Ok(false) => ClientInfo::New(session_name.unwrap(), None, None, None),
+            Err(kind) => {
+                eprintln!("{}", session_listing_error_message(kind));
+                process::exit(1);
+            },
         },
-        Some(prefix) => match match_session_name(prefix).unwrap() {
-            SessionNameMatch::UniquePrefix(s) | SessionNameMatch::Exact(s) => {
+        Some(prefix) => match match_session_name(prefix) {
+            Ok(SessionNameMatch::UniquePrefix(s)) | Ok(SessionNameMatch::Exact(s)) => {
                 ClientInfo::Attach(s, config_options)
             },
-            SessionNameMatch::AmbiguousPrefix(sessions) => {
+            Ok(SessionNameMatch::AmbiguousPrefix(sessions)) => {
                 println!(
                     "Ambiguous selection: multiple sessions names start with '{}':",
                     prefix
@@ -652,8 +585,12 @@ fn attach_with_session_name(
                 );
                 process::exit(1);
             },
-            SessionNameMatch::None => {
+            Ok(SessionNameMatch::None) => {
                 eprintln!("No session with the name '{}' found!", prefix);
+                process::exit(1);
+            },
+            Err(kind) => {
+                eprintln!("{}", session_listing_error_message(kind));
                 process::exit(1);
             },
         },
@@ -674,8 +611,6 @@ fn attach_with_session_name(
 }
 
 pub(crate) fn start_client(opts: CliArgs) {
-    // look for old YAML config/layout/theme files and convert them to KDL
-    convert_old_yaml_files(&opts);
     let (
         config,
         client_layout_info,
@@ -730,6 +665,9 @@ pub(crate) fn start_client(opts: CliArgs) {
                     forget: false,
                     ca_cert: None,
                     insecure: false,
+                    initial_command: vec![],
+                    close_on_exit: false,
+                    start_suspended: false,
                 }));
             } else {
                 opts.command = None;
@@ -752,6 +690,7 @@ pub(crate) fn start_client(opts: CliArgs) {
             assert_session_ne(&session_name);
         };
 
+        #[cfg_attr(not(feature = "web_server_capability"), allow(unused_variables))]
         if let Some(Command::Sessions(Sessions::Attach {
             session_name,
             create,
@@ -764,6 +703,9 @@ pub(crate) fn start_client(opts: CliArgs) {
             forget,
             ca_cert,
             insecure,
+            initial_command,
+            close_on_exit,
+            start_suspended,
         })) = opts.command.clone()
         {
             if let Some(remote_session_url) = session_name.as_ref().and_then(|s| {
@@ -780,6 +722,11 @@ pub(crate) fn start_client(opts: CliArgs) {
 
                 if options.is_some() || create || create_background || force_run_commands {
                     eprintln!("Cannot attach to remote session with options.");
+                    std::process::exit(2);
+                }
+
+                if !initial_command.is_empty() {
+                    eprintln!("Cannot run an initial command on a remote session.");
                     std::process::exit(2);
                 }
 
@@ -867,6 +814,18 @@ pub(crate) fn start_client(opts: CliArgs) {
                     client.set_cwd(new_session_cwd);
                 }
 
+                let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                if let Some(initial_panes) = initial_panes_from_cli(
+                    initial_command,
+                    None,
+                    Some(current_dir.clone()),
+                    current_dir,
+                    close_on_exit,
+                    start_suspended,
+                ) {
+                    client.set_initial_panes(initial_panes);
+                }
+
                 let tab_position_to_focus = reconnect_to_session
                     .as_ref()
                     .and_then(|r| r.tab_position.clone());
@@ -893,7 +852,7 @@ pub(crate) fn start_client(opts: CliArgs) {
                     opts,
                     config,
                     config_options,
-                    ClientInfo::New(session_name, layout_info, new_session_cwd),
+                    ClientInfo::New(session_name, layout_info, new_session_cwd, None),
                     None,
                     None,
                     is_a_reconnect,
@@ -940,7 +899,12 @@ pub(crate) fn start_client(opts: CliArgs) {
                                 opts,
                                 config,
                                 config_options.clone(),
-                                ClientInfo::New(session_name.clone(), layout_info, new_session_cwd),
+                                ClientInfo::New(
+                                    session_name.clone(),
+                                    layout_info,
+                                    new_session_cwd,
+                                    None,
+                                ),
                                 None,
                                 None,
                                 is_a_reconnect,
@@ -963,7 +927,7 @@ pub(crate) fn start_client(opts: CliArgs) {
                     opts,
                     config,
                     config_options,
-                    ClientInfo::New(session_name, layout_info, new_session_cwd),
+                    ClientInfo::New(session_name, layout_info, new_session_cwd, None),
                     None,
                     None,
                     is_a_reconnect,

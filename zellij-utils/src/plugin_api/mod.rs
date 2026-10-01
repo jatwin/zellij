@@ -5,11 +5,13 @@ pub mod file;
 pub mod input_mode;
 pub mod key;
 pub mod message;
+pub mod pane_frame_style;
 pub mod pipe_message;
 pub mod plugin_command;
 pub mod plugin_ids;
 pub mod plugin_permission;
 pub mod resize;
+pub mod shared_plugin;
 pub mod style;
 // NOTE: This code is currently out of order.
 // Refer to [the PR introducing this change][1] to learn more about the reasons.
