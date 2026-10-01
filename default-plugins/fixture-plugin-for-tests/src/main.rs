@@ -75,6 +75,10 @@ impl ZellijPlugin for State {
             .get("subscribe_mode_update")
             .map(|v| v == "true")
             .unwrap_or(false);
+        let should_subscribe_nested_session_events = configuration
+            .get("subscribe_nested_session_events")
+            .map(|v| v == "true")
+            .unwrap_or(false);
         self.configuration = configuration;
         subscribe(&[
             EventType::InputReceived,
@@ -93,6 +97,12 @@ impl ZellijPlugin for State {
         }
         if should_subscribe_mode_update {
             subscribe(&[EventType::ModeUpdate]);
+        }
+        if should_subscribe_nested_session_events {
+            subscribe(&[
+                EventType::NestedSessionModeUpdate,
+                EventType::NestedSessionEnded,
+            ]);
         }
         watch_filesystem();
     }
@@ -173,6 +183,8 @@ impl ZellijPlugin for State {
                 BareKey::Char('6') if key.has_no_modifiers() => close_focused_tab(),
                 BareKey::Char('7') if key.has_no_modifiers() => undo_rename_tab(),
                 BareKey::Char('8') if key.has_no_modifiers() => quit_zellij(),
+                BareKey::Char('9') if key.has_no_modifiers() => new_pane(),
+                BareKey::Char('0') if key.has_no_modifiers() => toggle_floating_panes(None),
                 BareKey::Char('a') if key.has_only_modifiers(&[KeyModifier::Ctrl]) => {
                     previous_swap_layout()
                 },
@@ -626,6 +638,9 @@ impl ZellijPlugin for State {
                     // Test clear_pane_highlights
                     clear_pane_highlights(PaneId::Terminal(1));
                 },
+                BareKey::Char('i') if key.has_only_modifiers(&[KeyModifier::Super]) => {
+                    toggle_floating_panes(Some(2));
+                },
                 BareKey::Char('a')
                     if key.has_only_modifiers(&[KeyModifier::Ctrl, KeyModifier::Shift]) =>
                 {
@@ -935,7 +950,57 @@ impl ZellijPlugin for State {
                     );
                     self.explicit_string_to_render = Some(format!("Override layout command sent"));
                 },
+                BareKey::Char('l')
+                    if key.has_only_modifiers(&[KeyModifier::Ctrl, KeyModifier::Alt]) =>
+                {
+                    focus_last_pane()
+                },
+                BareKey::Char('m')
+                    if key.has_only_modifiers(&[KeyModifier::Ctrl, KeyModifier::Alt]) =>
+                {
+                    let skip_nested_keybinds = self
+                        .configuration
+                        .get("skip_nested_keybinds_request")
+                        .map(|v| v == "true")
+                        .unwrap_or(false);
+                    if !skip_nested_keybinds {
+                        self.explicit_string_to_render =
+                            Some(match get_nested_session_keybinds(PaneId::Terminal(1)) {
+                                Ok(nested_session_keybinds) => format!(
+                                    "Nested keybinds ok: path={:?}, mode={:?}, base_mode={:?}, generation={}, bindings={}",
+                                    nested_session_keybinds.session_path,
+                                    nested_session_keybinds.mode,
+                                    nested_session_keybinds.base_mode,
+                                    nested_session_keybinds.keybinds_generation,
+                                    nested_session_keybinds
+                                        .keybinds
+                                        .iter()
+                                        .map(|(_mode, bindings)| bindings.len())
+                                        .sum::<usize>()
+                                ),
+                                Err(e) => format!("Nested keybinds error: {:?}", e),
+                            });
+                    }
+                },
                 _ => {},
+            },
+            Event::NestedSessionModeUpdate {
+                pane_id,
+                session_path,
+                mode,
+                keybinds_generation,
+                ..
+            } => {
+                self.explicit_string_to_render = Some(format!(
+                    "Nested mode update: pane={:?}, path={:?}, mode={:?}, generation={}",
+                    pane_id, session_path, mode, keybinds_generation
+                ));
+            },
+            Event::NestedSessionEnded { pane_id, reason } => {
+                self.explicit_string_to_render = Some(format!(
+                    "Nested session ended: pane={:?}, reason={:?}",
+                    pane_id, reason
+                ));
             },
             Event::CustomMessage(message, payload) => {
                 if message == "pong" {
@@ -983,6 +1048,8 @@ impl ZellijPlugin for State {
             );
         } else if name == "message_to_plugin" {
             self.message_to_plugin_payload = payload.clone();
+        } else if name == "panic_while_handling_pipe" {
+            panic!("intentional panic for the pipe-release-on-crash test");
         }
         let should_render = true;
         should_render

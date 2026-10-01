@@ -1,48 +1,64 @@
 use crate::output::CharacterChunk;
-use crate::panes::{AnsiCode, RcCharacterStyles, TerminalCharacter, EMPTY_TERMINAL_CHARACTER};
+use crate::panes::{
+    AnsiCode, CharacterStyles, RcCharacterStyles, TerminalCharacter, EMPTY_TERMINAL_CHARACTER,
+};
+use crate::tab::GuestChoiceIndicator;
+use crate::ui::border_glyphs::{self, Corner};
 use crate::ui::boundaries::boundary_type;
+use crate::ui::hint_text::{
+    exit_code_segments, hover_segments, rerun_segments, resize_segments, HintExitStatus, HintLevel,
+    HintSegment, HintTier,
+};
 use crate::ClientId;
-use zellij_utils::data::{client_id_to_colors, PaletteColor, Style};
+use zellij_utils::data::{client_slot_to_colors, BorderStyle, LineStyle, PaletteColor, Style};
 use zellij_utils::errors::prelude::*;
-use zellij_utils::pane_size::{Offset, Viewport};
+use zellij_utils::pane_size::{Offset, PaneGeom, Viewport};
 use zellij_utils::position::Position;
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+fn styled_characters(
+    characters: &str,
+    style_character: impl Fn(&mut CharacterStyles),
+) -> Vec<TerminalCharacter> {
+    characters
+        .chars()
+        .map(|character| {
+            let mut styles = RcCharacterStyles::reset();
+            styles.update(|styles| style_character(styles));
+            TerminalCharacter::new_styled(character, styles)
+        })
+        .collect()
+}
+
 fn foreground_color(characters: &str, color: Option<PaletteColor>) -> Vec<TerminalCharacter> {
-    let mut colored_string = Vec::new();
-    for character in characters.chars() {
-        let mut styles = RcCharacterStyles::reset();
-        styles.update(|styles| {
-            styles.bold = Some(AnsiCode::On);
-            match color {
-                Some(palette_color) => {
-                    styles.foreground = Some(AnsiCode::from(palette_color));
-                },
-                None => {},
-            }
-        });
-        let terminal_character = TerminalCharacter::new_styled(character, styles);
-        colored_string.push(terminal_character);
-    }
-    colored_string
+    styled_characters(characters, |styles| {
+        styles.bold = Some(AnsiCode::On);
+        if let Some(palette_color) = color {
+            styles.foreground = Some(AnsiCode::from(palette_color));
+        }
+    })
+}
+
+fn dimmed_foreground_color(
+    characters: &str,
+    color: Option<PaletteColor>,
+) -> Vec<TerminalCharacter> {
+    styled_characters(characters, |styles| {
+        styles.dim = Some(AnsiCode::On);
+        if let Some(palette_color) = color {
+            styles.foreground = Some(AnsiCode::from(palette_color));
+        }
+    })
 }
 
 fn background_color(characters: &str, color: Option<PaletteColor>) -> Vec<TerminalCharacter> {
-    let mut colored_string = Vec::new();
-    for character in characters.chars() {
-        let mut styles = RcCharacterStyles::reset();
-        styles.update(|styles| match color {
-            Some(palette_color) => {
-                styles.background = Some(AnsiCode::from(palette_color));
-                styles.bold(Some(AnsiCode::On));
-            },
-            None => {},
-        });
-        let terminal_character = TerminalCharacter::new_styled(character, styles);
-        colored_string.push(terminal_character);
-    }
-    colored_string
+    styled_characters(characters, |styles| {
+        if let Some(palette_color) = color {
+            styles.background = Some(AnsiCode::from(palette_color));
+            styles.bold(Some(AnsiCode::On));
+        }
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -51,15 +67,27 @@ enum ExitStatus {
     Exited,
 }
 
+#[derive(Clone, PartialEq)]
+pub struct StackListEntry {
+    pub width: usize,
+    pub label: String,
+    pub is_selected: bool,
+    pub is_emphasized: bool,
+    pub stack_is_focused: bool,
+}
+
 pub struct FrameParams {
     pub focused_client: Option<ClientId>,
     pub is_main_client: bool, // more accurately: is_focused_for_main_client
     pub other_focused_clients: Vec<ClientId>,
+    pub other_focused_client_slots: Vec<usize>,
     pub style: Style,
+    pub border_style: BorderStyle,
     pub color: Option<PaletteColor>,
     pub other_cursors_exist_in_session: bool,
     pub pane_is_stacked_under: bool,
     pub pane_is_stacked_over: bool,
+    pub pane_is_stacked: bool,
     pub should_draw_pane_frames: bool,
     pub pane_is_floating: bool,
     pub content_offset: Offset,
@@ -67,6 +95,14 @@ pub struct FrameParams {
     pub pane_is_selectable: bool,
     pub show_help_text: bool,
     pub highlight_tooltip: Option<String>,
+    pub omit_title: bool,
+    pub frame_geom_override: Option<PaneGeom>,
+    pub stack_list_entry: Option<StackListEntry>,
+    pub blank_title: bool,
+    pub mouse_scroll_resize: bool,
+    pub mouse_hover_tips: bool,
+    pub dimmed: bool,
+    pub guest_choice_indicator: Option<GuestChoiceIndicator>,
 }
 
 #[derive(Default, PartialEq)]
@@ -75,15 +111,18 @@ pub struct PaneFrame {
     pub title: String,
     pub scroll_position: (usize, usize), // (position, length)
     pub style: Style,
+    pub border_style: BorderStyle,
     pub color: Option<PaletteColor>,
     pub focused_client: Option<ClientId>,
     pub is_main_client: bool,
     pub other_cursors_exist_in_session: bool,
     pub other_focused_clients: Vec<ClientId>,
+    pub other_focused_client_slots: Vec<usize>,
     exit_status: Option<ExitStatus>,
     is_first_run: bool,
     pane_is_stacked_over: bool,
     pane_is_stacked_under: bool,
+    pane_is_stacked: bool,
     should_draw_pane_frames: bool,
     is_pinned: bool,
     is_floating: bool,
@@ -92,6 +131,13 @@ pub struct PaneFrame {
     is_selectable: bool,
     show_help_text: bool,
     highlight_tooltip: Option<String>,
+    omit_title: bool,
+    stack_list_entry: Option<StackListEntry>,
+    color_override: Option<PaletteColor>,
+    mouse_scroll_resize: bool,
+    mouse_hover_tips: bool,
+    dimmed: bool,
+    guest_choice_indicator: Option<GuestChoiceIndicator>,
 }
 
 impl PaneFrame {
@@ -106,15 +152,18 @@ impl PaneFrame {
             title: main_title,
             scroll_position,
             style: frame_params.style,
+            border_style: frame_params.border_style,
             color: frame_params.color,
             focused_client: frame_params.focused_client,
             is_main_client: frame_params.is_main_client,
             other_focused_clients: frame_params.other_focused_clients,
+            other_focused_client_slots: frame_params.other_focused_client_slots,
             other_cursors_exist_in_session: frame_params.other_cursors_exist_in_session,
             exit_status: None,
             is_first_run: false,
             pane_is_stacked_over: frame_params.pane_is_stacked_over,
             pane_is_stacked_under: frame_params.pane_is_stacked_under,
+            pane_is_stacked: frame_params.pane_is_stacked,
             should_draw_pane_frames: frame_params.should_draw_pane_frames,
             is_pinned: false,
             is_floating: frame_params.pane_is_floating,
@@ -123,6 +172,13 @@ impl PaneFrame {
             is_selectable: frame_params.pane_is_selectable,
             show_help_text: frame_params.show_help_text,
             highlight_tooltip: frame_params.highlight_tooltip,
+            omit_title: frame_params.omit_title,
+            stack_list_entry: frame_params.stack_list_entry,
+            color_override: None,
+            mouse_scroll_resize: frame_params.mouse_scroll_resize,
+            mouse_hover_tips: frame_params.mouse_hover_tips,
+            dimmed: frame_params.dimmed,
+            guest_choice_indicator: frame_params.guest_choice_indicator,
         }
     }
     pub fn is_pinned(mut self, is_pinned: bool) -> Self {
@@ -140,36 +196,77 @@ impl PaneFrame {
     }
     pub fn override_color(&mut self, color: PaletteColor) {
         self.color = Some(color);
+        self.color_override = Some(color);
     }
-    fn client_cursor(&self, client_id: ClientId) -> Vec<TerminalCharacter> {
-        let color = client_id_to_colors(client_id, self.style.colors.multiplayer_user_colors);
+    fn client_cursor(&self, display_slot: usize) -> Vec<TerminalCharacter> {
+        let color = client_slot_to_colors(display_slot, self.style.colors.multiplayer_user_colors);
         background_color(" ", color.map(|c| c.0))
     }
-    fn get_corner(&self, corner: &'static str) -> &'static str {
-        let corner = if !self.should_draw_pane_frames
-            && (corner == boundary_type::TOP_LEFT || corner == boundary_type::TOP_RIGHT)
-        {
-            boundary_type::HORIZONTAL
-        } else if self.pane_is_stacked_under && corner == boundary_type::TOP_RIGHT {
-            boundary_type::BOTTOM_RIGHT
-        } else if self.pane_is_stacked_under && corner == boundary_type::TOP_LEFT {
-            boundary_type::BOTTOM_LEFT
-        } else {
-            corner
-        };
-        if self.style.rounded_corners {
-            match corner {
-                boundary_type::TOP_RIGHT => boundary_type::TOP_RIGHT_ROUND,
-                boundary_type::TOP_LEFT => boundary_type::TOP_LEFT_ROUND,
-                boundary_type::BOTTOM_RIGHT => boundary_type::BOTTOM_RIGHT_ROUND,
-                boundary_type::BOTTOM_LEFT => boundary_type::BOTTOM_LEFT_ROUND,
-                _ => corner,
-            }
-        } else {
-            corner
+    fn top_horizontal(&self) -> &'static str {
+        border_glyphs::horizontal(self.border_style.top)
+    }
+    fn bottom_horizontal(&self) -> &'static str {
+        border_glyphs::horizontal(self.border_style.bottom)
+    }
+    fn left_vertical(&self) -> &'static str {
+        border_glyphs::vertical(self.border_style.left)
+    }
+    fn right_vertical(&self) -> &'static str {
+        border_glyphs::vertical(self.border_style.right)
+    }
+    fn title_separator_left(&self) -> &'static str {
+        border_glyphs::title_separator_left(self.border_style.top)
+    }
+    fn title_separator_right(&self) -> &'static str {
+        border_glyphs::title_separator_right(self.border_style.top)
+    }
+    fn horizontal_style_of_corner(&self, corner: Corner) -> LineStyle {
+        match corner {
+            Corner::TopLeft | Corner::TopRight => self.border_style.top,
+            Corner::BottomLeft | Corner::BottomRight => self.border_style.bottom,
         }
     }
+    fn vertical_style_of_corner(&self, corner: Corner) -> LineStyle {
+        match corner {
+            Corner::TopLeft | Corner::BottomLeft => self.border_style.left,
+            Corner::TopRight | Corner::BottomRight => self.border_style.right,
+        }
+    }
+    fn get_corner(&self, corner: &'static str) -> &'static str {
+        if !self.should_draw_pane_frames
+            && (corner == boundary_type::TOP_LEFT || corner == boundary_type::TOP_RIGHT)
+        {
+            return self.top_horizontal();
+        }
+        let style_corner = match corner {
+            boundary_type::TOP_LEFT => Corner::TopLeft,
+            boundary_type::TOP_RIGHT => Corner::TopRight,
+            boundary_type::BOTTOM_LEFT => Corner::BottomLeft,
+            _ => Corner::BottomRight,
+        };
+        let shape_corner = if self.pane_is_stacked_under {
+            match style_corner {
+                Corner::TopRight => Corner::BottomRight,
+                Corner::TopLeft => Corner::BottomLeft,
+                other => other,
+            }
+        } else {
+            style_corner
+        };
+        border_glyphs::corner(
+            shape_corner,
+            self.horizontal_style_of_corner(style_corner),
+            self.vertical_style_of_corner(style_corner),
+            self.border_style.rounded_corners,
+        )
+    }
     fn render_title_right_side(
+        &self,
+        max_length: usize,
+    ) -> Option<(Vec<TerminalCharacter>, usize)> {
+        self.render_title_right_side_inner(max_length)
+    }
+    fn render_title_right_side_inner(
         &self,
         max_length: usize,
     ) -> Option<(Vec<TerminalCharacter>, usize)> {
@@ -254,8 +351,8 @@ impl PaneFrame {
         }
     }
     fn render_my_focus(&self, max_length: usize) -> Option<(Vec<TerminalCharacter>, usize)> {
-        let mut left_separator = foreground_color(boundary_type::VERTICAL_LEFT, self.color);
-        let mut right_separator = foreground_color(boundary_type::VERTICAL_RIGHT, self.color);
+        let mut left_separator = foreground_color(self.title_separator_left(), self.color);
+        let mut right_separator = foreground_color(self.title_separator_right(), self.color);
         let full_indication_text = "MY FOCUS";
         let mut full_indication = vec![];
         full_indication.append(&mut left_separator);
@@ -284,16 +381,16 @@ impl PaneFrame {
         &self,
         max_length: usize,
     ) -> Option<(Vec<TerminalCharacter>, usize)> {
-        let mut left_separator = foreground_color(boundary_type::VERTICAL_LEFT, self.color);
-        let mut right_separator = foreground_color(boundary_type::VERTICAL_RIGHT, self.color);
+        let mut left_separator = foreground_color(self.title_separator_left(), self.color);
+        let mut right_separator = foreground_color(self.title_separator_right(), self.color);
         let full_indication_text = "MY FOCUS AND:";
         let short_indication_text = "+";
         let mut full_indication = foreground_color(full_indication_text, self.color);
         let mut full_indication_len = full_indication_text.width();
         let mut short_indication = foreground_color(short_indication_text, self.color);
         let mut short_indication_len = short_indication_text.width();
-        for client_id in &self.other_focused_clients {
-            let mut text = self.client_cursor(*client_id);
+        for display_slot in &self.other_focused_client_slots {
+            let mut text = self.client_cursor(*display_slot);
             full_indication_len += 2;
             full_indication.push(EMPTY_TERMINAL_CHARACTER);
             full_indication.append(&mut text.clone());
@@ -327,8 +424,8 @@ impl PaneFrame {
         &self,
         max_length: usize,
     ) -> Option<(Vec<TerminalCharacter>, usize)> {
-        let mut left_separator = foreground_color(boundary_type::VERTICAL_LEFT, self.color);
-        let mut right_separator = foreground_color(boundary_type::VERTICAL_RIGHT, self.color);
+        let mut left_separator = foreground_color(self.title_separator_left(), self.color);
+        let mut right_separator = foreground_color(self.title_separator_right(), self.color);
         let full_indication_text = if self.other_focused_clients.len() == 1 {
             "FOCUSED USER:"
         } else {
@@ -341,8 +438,8 @@ impl PaneFrame {
         let mut middle_indication_len = middle_indication_text.width();
         let mut short_indication = vec![];
         let mut short_indication_len = 0;
-        for client_id in &self.other_focused_clients {
-            let mut text = self.client_cursor(*client_id);
+        for display_slot in &self.other_focused_client_slots {
+            let mut text = self.client_cursor(*display_slot);
             full_indication_len += 2;
             full_indication.push(EMPTY_TERMINAL_CHARACTER);
             full_indication.append(&mut text.clone());
@@ -386,6 +483,17 @@ impl PaneFrame {
     }
     fn render_title_middle(&self, max_length: usize) -> Option<(Vec<TerminalCharacter>, usize)> {
         // string and length because of color
+        let renders_exit_status_in_title = self.pane_is_stacked_under
+            || self.pane_is_stacked_over
+            || !self.should_draw_pane_frames;
+        if renders_exit_status_in_title && self.exit_status.is_some() {
+            let (first_part, first_part_len) = self.first_exited_held_title_part_full();
+            return if first_part_len <= max_length {
+                Some((first_part, first_part_len))
+            } else {
+                None
+            };
+        }
         if self.is_main_client
             && self.other_focused_clients.is_empty()
             && !self.other_cursors_exist_in_session
@@ -400,15 +508,6 @@ impl PaneFrame {
             self.render_my_and_others_focus(max_length)
         } else if !self.other_focused_clients.is_empty() {
             self.render_other_focused_users(max_length)
-        } else if (self.pane_is_stacked_under || self.pane_is_stacked_over)
-            && self.exit_status.is_some()
-        {
-            let (first_part, first_part_len) = self.first_exited_held_title_part_full();
-            if first_part_len <= max_length {
-                Some((first_part, first_part_len))
-            } else {
-                None
-            }
         } else {
             None
         }
@@ -505,7 +604,7 @@ impl PaneFrame {
                 col += right_side_len;
                 continue;
             } else {
-                title_line.append(&mut foreground_color(boundary_type::HORIZONTAL, self.color));
+                title_line.append(&mut foreground_color(self.top_horizontal(), self.color));
             }
             if col == self.geom.x + self.geom.cols - 1 {
                 break;
@@ -547,7 +646,7 @@ impl PaneFrame {
                 col += *middle_len;
                 continue;
             } else {
-                title_line.append(&mut foreground_color(boundary_type::HORIZONTAL, self.color));
+                title_line.append(&mut foreground_color(self.top_horizontal(), self.color));
             }
             if col == self.geom.x + self.geom.cols - 1 {
                 break;
@@ -582,7 +681,7 @@ impl PaneFrame {
                 col += *middle_len;
                 continue;
             } else {
-                title_line.append(&mut foreground_color(boundary_type::HORIZONTAL, self.color));
+                title_line.append(&mut foreground_color(self.top_horizontal(), self.color));
             }
             if col == self.geom.x + self.geom.cols - 1 {
                 break;
@@ -605,7 +704,7 @@ impl PaneFrame {
         let total_title_length = self.geom.cols.saturating_sub(2); // 2 for the left and right corners
         let mut middle = String::new();
         for _ in (left_side_len + right_side_len)..total_title_length {
-            middle.push_str(boundary_type::HORIZONTAL);
+            middle.push_str(self.top_horizontal());
         }
         let mut ret = vec![];
         ret.append(&mut left_boundary);
@@ -627,7 +726,7 @@ impl PaneFrame {
         let total_title_length = self.geom.cols.saturating_sub(2); // 2 for the left and right corners
         let mut middle_padding = String::new();
         for _ in *left_side_len..total_title_length {
-            middle_padding.push_str(boundary_type::HORIZONTAL);
+            middle_padding.push_str(self.top_horizontal());
         }
         let mut ret = vec![];
         ret.append(&mut left_boundary);
@@ -644,7 +743,7 @@ impl PaneFrame {
         let total_title_length = self.geom.cols.saturating_sub(2); // 2 for the left and right corners
         let mut middle_padding = String::new();
         for _ in 0..total_title_length {
-            middle_padding.push_str(boundary_type::HORIZONTAL);
+            middle_padding.push_str(self.top_horizontal());
         }
         let mut ret = vec![];
         ret.append(&mut left_boundary);
@@ -703,13 +802,320 @@ impl PaneFrame {
             .or_else(|| Some(self.title_line_without_middle()))
             .with_context(|| format!("failed to render title '{}'", self.title))
     }
+    fn render_stack_list_entry(&self, entry: &StackListEntry) -> Vec<TerminalCharacter> {
+        let usable_cols = self.geom.cols;
+        let selection_marker = "> ";
+        let marker_width = selection_marker.width();
+        let corner_padding = 1;
+        let corner_overhead = 2 * (1 + corner_padding);
+        let inner_width = entry
+            .width
+            .min(usable_cols.saturating_sub(marker_width + corner_overhead));
+        let content = if entry.label.width() <= inner_width {
+            entry.label.clone()
+        } else {
+            let truncation_budget = inner_width.saturating_sub(1);
+            let mut truncated = String::new();
+            for character in entry.label.chars() {
+                if truncated.width() + character.width().unwrap_or(0) > truncation_budget {
+                    break;
+                }
+                truncated.push(character);
+            }
+            truncated.push('…');
+            truncated
+        };
+        let full_width_entry_length = marker_width + corner_overhead + inner_width;
+        let entry_start = usable_cols.saturating_sub(full_width_entry_length) / 2;
+        let left_budget = entry_start;
+        let (mut focus_part, focus_length) = self
+            .bracketed_focus_indicator(left_budget)
+            .unwrap_or((vec![], 0));
+        let mut line = Vec::with_capacity(usable_cols);
+        line.append(&mut focus_part);
+        for _ in focus_length..left_budget {
+            line.push(EMPTY_TERMINAL_CHARACTER);
+        }
+        let unfocused_color = self.style.colors.frame_unselected.map(|frame| frame.base);
+        let style_entry_text = |text: &str| {
+            if entry.is_selected || entry.is_emphasized {
+                foreground_color(text, self.color)
+            } else if entry.stack_is_focused {
+                foreground_color(text, unfocused_color)
+            } else {
+                dimmed_foreground_color(text, unfocused_color)
+            }
+        };
+        if entry.is_selected {
+            line.append(&mut foreground_color(selection_marker, None));
+        } else {
+            for _ in 0..marker_width {
+                line.push(EMPTY_TERMINAL_CHARACTER);
+            }
+        }
+        line.append(&mut foreground_color(self.left_vertical(), None));
+        for _ in 0..corner_padding {
+            line.push(EMPTY_TERMINAL_CHARACTER);
+        }
+        line.append(&mut style_entry_text(&content));
+        let content_padding = inner_width.saturating_sub(content.width());
+        for _ in 0..content_padding {
+            line.push(EMPTY_TERMINAL_CHARACTER);
+        }
+        for _ in 0..corner_padding {
+            line.push(EMPTY_TERMINAL_CHARACTER);
+        }
+        line.append(&mut foreground_color(self.right_vertical(), None));
+        let mut occupied_columns = entry_start + full_width_entry_length;
+        let (mut scroll_part, scroll_length) = self
+            .bracketed_scroll_indicator(usable_cols.saturating_sub(occupied_columns))
+            .unwrap_or((vec![], 0));
+        if self.exit_status.is_some() {
+            let (mut exit_part, exit_length) = self.first_exited_held_title_part_full();
+            if occupied_columns + 1 + exit_length + scroll_length <= usable_cols {
+                line.push(EMPTY_TERMINAL_CHARACTER);
+                line.append(&mut exit_part);
+                occupied_columns += 1 + exit_length;
+            }
+        }
+        while occupied_columns < usable_cols.saturating_sub(scroll_length) {
+            line.push(EMPTY_TERMINAL_CHARACTER);
+            occupied_columns += 1;
+        }
+        line.append(&mut scroll_part);
+        line
+    }
     fn render_one_line_title(&self) -> Result<Vec<TerminalCharacter>> {
-        let total_title_length = self.geom.cols.saturating_sub(2); // 2 for the left and right corners
+        if self.should_draw_pane_frames {
+            let total_title_length = self.geom.cols.saturating_sub(2);
+            return self
+                .render_title_middle(total_title_length)
+                .map(|(middle, middle_length)| self.title_line_with_middle(middle, &middle_length))
+                .or_else(|| Some(self.title_line_without_middle()))
+                .with_context(|| format!("failed to render title '{}'", self.title));
+        }
 
-        self.render_title_middle(total_title_length)
-            .map(|(middle, middle_length)| self.title_line_with_middle(middle, &middle_length))
-            .or_else(|| Some(self.title_line_without_middle()))
-            .with_context(|| format!("failed to render title '{}'", self.title))
+        let width = self.geom.cols;
+        let title = self.bracketed_pane_title(width);
+        let title_length = title.as_ref().map(|(_, length)| *length).unwrap_or(0);
+        let side_budget = width.saturating_sub(title_length) / 2;
+        let focus = self.bracketed_focus_indicator(side_budget);
+        let focus_length = focus.as_ref().map(|(_, length)| *length).unwrap_or(0);
+        let right_budget = width.saturating_sub(focus_length + title_length);
+        let right = self.bracketed_scroll_indicator(right_budget);
+        Ok(self.compose_bracketed_title(focus, title, right))
+    }
+    fn bracketed_title_part(&self, content: &str) -> (Vec<TerminalCharacter>, usize) {
+        let text = format!(" [ {} ] ", content);
+        (foreground_color(&text, self.color), text.width())
+    }
+    fn bracketed_title_part_from_characters(
+        &self,
+        mut content: Vec<TerminalCharacter>,
+        content_length: usize,
+    ) -> (Vec<TerminalCharacter>, usize) {
+        let mut part = foreground_color(" [ ", self.color);
+        part.append(&mut content);
+        part.append(&mut foreground_color(" ] ", self.color));
+        (part, content_length + 6)
+    }
+    fn plain_title_part(&self, content: &str) -> (Vec<TerminalCharacter>, usize) {
+        let text = format!(" {} ", content);
+        (foreground_color(&text, self.color), text.width())
+    }
+    fn bracketed_pane_title(&self, max_length: usize) -> Option<(Vec<TerminalCharacter>, usize)> {
+        let title_padding = 2;
+        if self.title.is_empty() || max_length <= title_padding {
+            return None;
+        }
+        let exit_part = self
+            .exit_status
+            .is_some()
+            .then(|| self.first_exited_held_title_part_full());
+        let exit_length = exit_part.as_ref().map(|(_, length)| *length).unwrap_or(0);
+        let content_max_length = max_length.saturating_sub(title_padding + exit_length);
+        let content = if self.title.width() <= content_max_length {
+            self.title.clone()
+        } else {
+            let truncation_budget = content_max_length.saturating_sub(1);
+            let mut truncated = String::new();
+            for character in self.title.chars() {
+                if truncated.width() + character.width().unwrap_or(0) > truncation_budget {
+                    break;
+                }
+                truncated.push(character);
+            }
+            truncated.push('…');
+            truncated
+        };
+        let (mut part, mut length) = self.plain_title_part(&content);
+        if let Some((mut exit, exit_length)) = exit_part {
+            part.append(&mut exit);
+            length += exit_length;
+        }
+        Some((part, length))
+    }
+    fn bracketed_scroll_indicator(
+        &self,
+        max_length: usize,
+    ) -> Option<(Vec<TerminalCharacter>, usize)> {
+        let has_scroll = self.scroll_position.0 > 0 || self.scroll_position.1 > 0;
+        if !(has_scroll && self.is_selectable) {
+            return None;
+        }
+        let full_indication = format!(
+            "SCROLL: {}/{}",
+            self.scroll_position.0, self.scroll_position.1
+        );
+        let (full_part, full_length) = self.bracketed_title_part(&full_indication);
+        if full_length <= max_length {
+            return Some((full_part, full_length));
+        }
+        let short_indication = format!("{}/{}", self.scroll_position.0, self.scroll_position.1);
+        let (short_part, short_length) = self.bracketed_title_part(&short_indication);
+        if short_length <= max_length {
+            return Some((short_part, short_length));
+        }
+        None
+    }
+    fn bracketed_focus_indicator(
+        &self,
+        max_length: usize,
+    ) -> Option<(Vec<TerminalCharacter>, usize)> {
+        if self.is_main_client
+            && self.other_focused_clients.is_empty()
+            && !self.other_cursors_exist_in_session
+        {
+            None
+        } else if self.is_main_client
+            && self.other_focused_clients.is_empty()
+            && self.other_cursors_exist_in_session
+        {
+            let (full_part, full_length) = self.bracketed_title_part("MY FOCUS");
+            if full_length <= max_length {
+                Some((full_part, full_length))
+            } else {
+                let (short_part, short_length) = self.bracketed_title_part("ME");
+                (short_length <= max_length).then_some((short_part, short_length))
+            }
+        } else if self.is_main_client && !self.other_focused_clients.is_empty() {
+            self.bracketed_focused_users("MY FOCUS AND:", "+", max_length)
+        } else if !self.other_focused_clients.is_empty() {
+            let full_label = if self.other_focused_clients.len() == 1 {
+                "FOCUSED USER:"
+            } else {
+                "FOCUSED USERS:"
+            };
+            self.bracketed_focused_users(full_label, "U:", max_length)
+        } else {
+            None
+        }
+    }
+    fn focused_users_part(&self, label: &str) -> (Vec<TerminalCharacter>, usize) {
+        let mut content = foreground_color(label, self.color);
+        let mut content_length = label.width();
+        for display_slot in &self.other_focused_client_slots {
+            content.push(EMPTY_TERMINAL_CHARACTER);
+            content.append(&mut self.client_cursor(*display_slot));
+            content_length += 2;
+        }
+        self.bracketed_title_part_from_characters(content, content_length)
+    }
+    fn focused_users_cursors_part(&self) -> (Vec<TerminalCharacter>, usize) {
+        let mut content = vec![];
+        let mut content_length = 0;
+        for display_slot in &self.other_focused_client_slots {
+            if content_length > 0 {
+                content.push(EMPTY_TERMINAL_CHARACTER);
+                content_length += 1;
+            }
+            content.append(&mut self.client_cursor(*display_slot));
+            content_length += 1;
+        }
+        self.bracketed_title_part_from_characters(content, content_length)
+    }
+    fn bracketed_focused_users(
+        &self,
+        full_label: &str,
+        short_label: &str,
+        max_length: usize,
+    ) -> Option<(Vec<TerminalCharacter>, usize)> {
+        let (full_part, full_length) = self.focused_users_part(full_label);
+        if full_length <= max_length {
+            return Some((full_part, full_length));
+        }
+        let (short_part, short_length) = self.focused_users_part(short_label);
+        if short_length <= max_length {
+            return Some((short_part, short_length));
+        }
+        let (cursors_part, cursors_length) = self.focused_users_cursors_part();
+        (cursors_length <= max_length).then_some((cursors_part, cursors_length))
+    }
+    fn compose_bracketed_title(
+        &self,
+        left: Option<(Vec<TerminalCharacter>, usize)>,
+        middle: Option<(Vec<TerminalCharacter>, usize)>,
+        right: Option<(Vec<TerminalCharacter>, usize)>,
+    ) -> Vec<TerminalCharacter> {
+        let width = self.geom.cols;
+        let left_length = left.as_ref().map(|(_, length)| *length).unwrap_or(0);
+        let middle_length = middle.as_ref().map(|(_, length)| *length).unwrap_or(0);
+        let right_length = right.as_ref().map(|(_, length)| *length).unwrap_or(0);
+        let centered_start = (width / 2)
+            .saturating_sub(middle_length / 2)
+            .max(left_length);
+        let middle_start = if middle.is_some() {
+            if right_length > 0 {
+                let scroll_start = width.saturating_sub(right_length);
+                let centered_end = centered_start + middle_length;
+                if centered_end > scroll_start {
+                    scroll_start.saturating_sub(middle_length).max(left_length)
+                } else {
+                    centered_start
+                }
+            } else {
+                centered_start
+            }
+        } else {
+            left_length
+        };
+        let middle_end = if middle.is_some() {
+            middle_start + middle_length
+        } else {
+            left_length
+        };
+        let right_start = width.saturating_sub(right_length).max(middle_end);
+        let fill_character = if self.pane_is_stacked {
+            foreground_color(self.bottom_horizontal(), self.color)
+                .into_iter()
+                .next()
+                .unwrap_or(EMPTY_TERMINAL_CHARACTER)
+        } else {
+            EMPTY_TERMINAL_CHARACTER
+        };
+        let mut placements: Vec<(usize, Vec<TerminalCharacter>, usize)> = vec![];
+        if let Some((characters, length)) = left {
+            placements.push((0, characters, length));
+        }
+        if let Some((characters, length)) = middle {
+            placements.push((middle_start, characters, length));
+        }
+        if let Some((characters, length)) = right {
+            placements.push((right_start, characters, length));
+        }
+        let mut title_line = vec![];
+        let mut col = 0;
+        while col < width {
+            if let Some(index) = placements.iter().position(|(start, _, _)| *start == col) {
+                let (_, mut characters, length) = placements.remove(index);
+                title_line.append(&mut characters);
+                col += length;
+            } else {
+                title_line.push(fill_character.clone());
+                col += 1;
+            }
+        }
+        title_line
     }
     fn render_highlight_tooltip_undertitle(&self) -> Result<Vec<TerminalCharacter>> {
         let max_undertitle_length = self.geom.cols.saturating_sub(2);
@@ -731,7 +1137,7 @@ impl PaneFrame {
         let padding_len = max_undertitle_length.saturating_sub(text_len);
         let mut padding = String::new();
         for _ in 0..padding_len {
-            padding.push_str(boundary_type::HORIZONTAL);
+            padding.push_str(self.bottom_horizontal());
         }
 
         let mut ret = vec![];
@@ -765,7 +1171,7 @@ impl PaneFrame {
         let padding_len = max_undertitle_length.saturating_sub(help_text_len);
         let mut padding = String::new();
         for _ in 0..padding_len {
-            padding.push_str(boundary_type::HORIZONTAL);
+            padding.push_str(self.bottom_horizontal());
         }
 
         let mut ret = vec![];
@@ -777,51 +1183,31 @@ impl PaneFrame {
     }
 
     fn help_text_version_full(&self, max_length: usize) -> Option<(Vec<TerminalCharacter>, usize)> {
-        let text = if self.is_floating {
-            " Ctrl <MouseScroll> or Ctrl <drag borders> to resize "
-        } else {
-            " Ctrl <MouseScroll> or <drag borders> to resize "
-        };
-        let len = text.chars().count();
-        if len <= max_length {
-            Some((foreground_color(text, self.color), len))
-        } else {
-            None
-        }
+        self.help_text_version(max_length, HintTier::Full)
     }
 
     fn help_text_version_medium(
         &self,
         max_length: usize,
     ) -> Option<(Vec<TerminalCharacter>, usize)> {
-        let text = if self.is_floating {
-            " <Ctrl MouseScroll/drag borders> resize "
-        } else {
-            " <Ctrl MouseScroll>/<drag borders> resize "
-        };
-        let len = text.chars().count();
-        if len <= max_length {
-            Some((foreground_color(text, self.color), len))
-        } else {
-            None
-        }
+        self.help_text_version(max_length, HintTier::Medium)
     }
 
     fn help_text_version_short(
         &self,
         max_length: usize,
     ) -> Option<(Vec<TerminalCharacter>, usize)> {
-        let text = if self.is_floating {
-            " <Ctrl MouseScroll/drag borders> "
-        } else {
-            " <Ctrl MouseScroll>/<drag borders> "
-        };
-        let len = text.chars().count();
-        if len <= max_length {
-            Some((foreground_color(text, self.color), len))
-        } else {
-            None
-        }
+        self.help_text_version(max_length, HintTier::Minimal)
+    }
+
+    fn help_text_version(
+        &self,
+        max_length: usize,
+        tier: HintTier,
+    ) -> Option<(Vec<TerminalCharacter>, usize)> {
+        let segments = resize_segments(self.is_floating, self.mouse_scroll_resize, tier);
+        let (characters, length) = self.render_hint_segments(&segments);
+        (length <= max_length).then_some((characters, length))
     }
 
     fn render_held_undertitle(&self) -> Result<Vec<TerminalCharacter>> {
@@ -838,7 +1224,7 @@ impl PaneFrame {
                 // render exit status and tips
                 let mut padding = String::new();
                 for _ in full_text_len..max_undertitle_length {
-                    padding.push_str(boundary_type::HORIZONTAL);
+                    padding.push_str(self.bottom_horizontal());
                 }
                 let mut ret = vec![];
                 ret.append(&mut left_boundary);
@@ -851,7 +1237,7 @@ impl PaneFrame {
                 // render only exit status
                 let mut padding = String::new();
                 for _ in first_part_len..max_undertitle_length {
-                    padding.push_str(boundary_type::HORIZONTAL);
+                    padding.push_str(self.bottom_horizontal());
                 }
                 let mut ret = vec![];
                 ret.append(&mut left_boundary);
@@ -868,7 +1254,7 @@ impl PaneFrame {
                 let full_text_len = first_part_len;
                 let mut padding = String::new();
                 for _ in full_text_len..max_undertitle_length {
-                    padding.push_str(boundary_type::HORIZONTAL);
+                    padding.push_str(self.bottom_horizontal());
                 }
                 let mut ret = vec![];
                 ret.append(&mut left_boundary);
@@ -896,7 +1282,7 @@ impl PaneFrame {
                 // render exit status and tips
                 let mut padding = String::new();
                 for _ in hover_shortcuts_len..max_undertitle_length {
-                    padding.push_str(boundary_type::HORIZONTAL);
+                    padding.push_str(self.bottom_horizontal());
                 }
                 let mut ret = vec![];
                 ret.append(&mut left_boundary);
@@ -929,6 +1315,17 @@ impl PaneFrame {
     pub fn render(&self) -> Result<(Vec<CharacterChunk>, Option<String>)> {
         let err_context = || "failed to render pane frame";
         let mut character_chunks = vec![];
+        if self.omit_title {
+            return Ok((character_chunks, None));
+        }
+        if let Some(entry) = &self.stack_list_entry {
+            character_chunks.push(CharacterChunk::new(
+                self.render_stack_list_entry(entry),
+                self.geom.x,
+                self.geom.y,
+            ));
+            return Ok((character_chunks, None));
+        }
         if self.geom.rows == 1 || !self.should_draw_pane_frames {
             // we do this explicitly when not drawing pane frames because this should only happen
             // if this is a stacked pane with pane frames off (and it doesn't necessarily have only
@@ -974,7 +1371,7 @@ impl PaneFrame {
                             x,
                             y,
                         ));
-                    } else if self.show_help_text && self.is_main_client {
+                    } else if self.show_help_text && self.is_main_client && self.mouse_hover_tips {
                         let x = self.geom.x;
                         let y = self.geom.y + row;
                         character_chunks.push(CharacterChunk::new(
@@ -983,7 +1380,10 @@ impl PaneFrame {
                             x,
                             y,
                         ));
-                    } else if self.mouse_is_hovering_over_pane && !self.is_main_client {
+                    } else if self.mouse_is_hovering_over_pane
+                        && !self.is_main_client
+                        && self.mouse_hover_tips
+                    {
                         let x = self.geom.x;
                         let y = self.geom.y + row;
                         character_chunks.push(CharacterChunk::new(
@@ -1010,7 +1410,7 @@ impl PaneFrame {
                                 // bottom right corner
                                 self.get_corner(boundary_type::BOTTOM_RIGHT)
                             } else {
-                                boundary_type::HORIZONTAL
+                                self.bottom_horizontal()
                             };
 
                             let mut boundary_character = foreground_color(boundary, self.color);
@@ -1022,9 +1422,9 @@ impl PaneFrame {
                     }
                 } else {
                     let boundary_character_left =
-                        foreground_color(boundary_type::VERTICAL, self.color);
+                        foreground_color(self.left_vertical(), self.color);
                     let boundary_character_right =
-                        foreground_color(boundary_type::VERTICAL, self.color);
+                        foreground_color(self.right_vertical(), self.color);
 
                     let x = self.geom.x;
                     let y = self.geom.y + row;
@@ -1038,133 +1438,38 @@ impl PaneFrame {
         }
         Ok((character_chunks, None))
     }
+    fn render_hint_segments(&self, segments: &[HintSegment]) -> (Vec<TerminalCharacter>, usize) {
+        let mut characters = vec![];
+        let mut length = 0;
+        for segment in segments {
+            let color = match segment.level {
+                HintLevel::Plain => self.color,
+                HintLevel::Emphasis => Some(self.style.colors.text_unselected.emphasis_0),
+                HintLevel::Emphasis2 => Some(self.style.colors.text_unselected.emphasis_2),
+                HintLevel::Error => Some(self.style.colors.exit_code_error.base),
+                HintLevel::Success => Some(self.style.colors.exit_code_success.base),
+            };
+            characters.append(&mut foreground_color(&segment.text, color));
+            length += segment.text.width();
+        }
+        (characters, length)
+    }
     fn first_exited_held_title_part_full(&self) -> (Vec<TerminalCharacter>, usize) {
-        // (title part, length)
         match self.exit_status {
             Some(ExitStatus::Code(exit_code)) => {
-                let mut first_part = vec![];
-                let left_bracket = " [ ";
-                let exited_text = "EXIT CODE: ";
-                let exit_code_text = format!("{}", exit_code);
-                let exit_code_color = if exit_code == 0 {
-                    self.style.colors.exit_code_success.base
-                } else {
-                    self.style.colors.exit_code_error.base
-                };
-                let right_bracket = " ] ";
-                first_part.append(&mut foreground_color(left_bracket, self.color));
-                first_part.append(&mut foreground_color(exited_text, self.color));
-                first_part.append(&mut foreground_color(
-                    &exit_code_text,
-                    Some(exit_code_color),
-                ));
-                first_part.append(&mut foreground_color(right_bracket, self.color));
-                (
-                    first_part,
-                    left_bracket.len()
-                        + exited_text.len()
-                        + exit_code_text.len()
-                        + right_bracket.len(),
-                )
+                self.render_hint_segments(&exit_code_segments(HintExitStatus::Code(exit_code)))
             },
             Some(ExitStatus::Exited) => {
-                let mut first_part = vec![];
-                let left_bracket = " [ ";
-                let exited_text = "EXITED";
-                let right_bracket = " ] ";
-                first_part.append(&mut foreground_color(left_bracket, self.color));
-                first_part.append(&mut foreground_color(
-                    exited_text,
-                    Some(self.style.colors.exit_code_error.base),
-                ));
-                first_part.append(&mut foreground_color(right_bracket, self.color));
-                (
-                    first_part,
-                    left_bracket.len() + exited_text.len() + right_bracket.len(),
-                )
+                self.render_hint_segments(&exit_code_segments(HintExitStatus::Exited))
             },
-            None => (foreground_color(boundary_type::HORIZONTAL, self.color), 1),
+            None => (foreground_color(self.bottom_horizontal(), self.color), 1),
         }
     }
     fn second_held_title_part_full(&self) -> (Vec<TerminalCharacter>, usize) {
-        // (title part, length)
-        let mut second_part = vec![];
-        let left_enter_bracket = if self.is_first_run { " <" } else { "<" };
-        let enter_text = "ENTER";
-        let right_enter_bracket = ">";
-        let enter_tip = if self.is_first_run {
-            " run, "
-        } else {
-            " re-run, "
-        };
-
-        let left_esc_bracket = "<";
-        let esc_text = "ESC";
-        let right_esc_bracket = ">";
-        let esc_tip = " drop to shell, ";
-
-        let left_break_bracket = "<";
-        let break_text = "Ctrl-c";
-        let right_break_bracket = ">";
-        let break_tip = " exit ";
-        second_part.append(&mut foreground_color(left_enter_bracket, self.color));
-        second_part.append(&mut foreground_color(
-            enter_text,
-            Some(self.style.colors.text_unselected.emphasis_0),
-        ));
-        second_part.append(&mut foreground_color(right_enter_bracket, self.color));
-        second_part.append(&mut foreground_color(enter_tip, self.color));
-
-        second_part.append(&mut foreground_color(left_esc_bracket, self.color));
-        second_part.append(&mut foreground_color(
-            esc_text,
-            Some(self.style.colors.text_unselected.emphasis_0),
-        ));
-        second_part.append(&mut foreground_color(right_esc_bracket, self.color));
-        second_part.append(&mut foreground_color(esc_tip, self.color));
-
-        second_part.append(&mut foreground_color(left_break_bracket, self.color));
-        second_part.append(&mut foreground_color(
-            break_text,
-            Some(self.style.colors.text_unselected.emphasis_0),
-        ));
-        second_part.append(&mut foreground_color(right_break_bracket, self.color));
-        second_part.append(&mut foreground_color(break_tip, self.color));
-        (
-            second_part,
-            left_enter_bracket.len()
-                + enter_text.len()
-                + right_enter_bracket.len()
-                + enter_tip.len()
-                + left_esc_bracket.len()
-                + esc_text.len()
-                + right_esc_bracket.len()
-                + esc_tip.len()
-                + left_break_bracket.len()
-                + break_text.len()
-                + right_break_bracket.len()
-                + break_tip.len(),
-        )
+        self.render_hint_segments(&rerun_segments(self.is_first_run, HintTier::Full))
     }
     fn hover_shortcuts_part_full(&self) -> (Vec<TerminalCharacter>, usize) {
-        // (title part, length)
-        let mut hover_shortcuts = vec![];
-        let alt_click_text = " Alt <Click>";
-        let alt_click_tip = " - group,";
-        let alt_right_click_text = " Alt <Right-Click>";
-        let alt_right_click_tip = " - ungroup all ";
-
-        hover_shortcuts.append(&mut foreground_color(alt_click_text, self.color));
-        hover_shortcuts.append(&mut foreground_color(alt_click_tip, self.color));
-        hover_shortcuts.append(&mut foreground_color(alt_right_click_text, self.color));
-        hover_shortcuts.append(&mut foreground_color(alt_right_click_tip, self.color));
-        (
-            hover_shortcuts,
-            alt_click_text.chars().count()
-                + alt_click_tip.chars().count()
-                + alt_right_click_text.chars().count()
-                + alt_right_click_tip.chars().count(),
-        )
+        self.render_hint_segments(&hover_segments(HintTier::Full))
     }
     fn empty_undertitle(&self, max_undertitle_length: usize) -> Vec<TerminalCharacter> {
         let mut left_boundary =
@@ -1174,11 +1479,205 @@ impl PaneFrame {
         let mut ret = vec![];
         let mut padding = String::new();
         for _ in 0..max_undertitle_length {
-            padding.push_str(boundary_type::HORIZONTAL);
+            padding.push_str(self.bottom_horizontal());
         }
         ret.append(&mut left_boundary);
         ret.append(&mut foreground_color(&padding, self.color));
         ret.append(&mut right_boundary);
         ret
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zellij_utils::data::Style;
+    use zellij_utils::pane_size::{Offset, Viewport};
+
+    fn pane_frame_with(mouse_scroll_resize: bool, is_floating: bool, cols: usize) -> PaneFrame {
+        PaneFrame::new(
+            Viewport {
+                x: 0,
+                y: 0,
+                cols,
+                rows: 10,
+            },
+            (0, 0),
+            String::new(),
+            FrameParams {
+                focused_client: None,
+                is_main_client: true,
+                other_focused_clients: vec![],
+                other_focused_client_slots: vec![],
+                style: Style::default(),
+                border_style: BorderStyle::default(),
+                color: None,
+                other_cursors_exist_in_session: false,
+                pane_is_stacked_over: false,
+                pane_is_stacked_under: false,
+                pane_is_stacked: false,
+                should_draw_pane_frames: true,
+                pane_is_floating: is_floating,
+                content_offset: Offset::default(),
+                mouse_is_hovering_over_pane: false,
+                pane_is_selectable: true,
+                show_help_text: true,
+                highlight_tooltip: None,
+                omit_title: false,
+                frame_geom_override: None,
+                stack_list_entry: None,
+                blank_title: false,
+                mouse_scroll_resize,
+                mouse_hover_tips: true,
+                dimmed: false,
+                guest_choice_indicator: None,
+            },
+        )
+    }
+
+    fn characters_to_string(chars: &[TerminalCharacter]) -> String {
+        chars.iter().map(|c| c.character).collect()
+    }
+
+    fn frame_rows(border_style: BorderStyle) -> Vec<String> {
+        let mut frame = pane_frame_with(false, false, 10);
+        frame.border_style = border_style;
+        frame.geom.rows = 3;
+        frame.mouse_hover_tips = false;
+        frame.show_help_text = false;
+        let (chunks, _) = frame.render().unwrap();
+        let mut rows: Vec<(usize, usize, String)> = chunks
+            .iter()
+            .map(|c| (c.y, c.x, characters_to_string(&c.terminal_characters)))
+            .collect();
+        rows.sort();
+        let mut by_row: Vec<String> = vec![String::new(); 3];
+        for (y, _x, text) in rows {
+            by_row[y].push_str(&text);
+        }
+        by_row
+    }
+
+    #[test]
+    fn single_line_frame_with_rounded_corners() {
+        let rows = frame_rows(BorderStyle {
+            rounded_corners: true,
+            ..Default::default()
+        });
+        assert!(rows[0].starts_with('╭'), "{}", rows[0]);
+        assert!(rows[0].ends_with('╮'), "{}", rows[0]);
+        assert_eq!(rows[1], "││");
+        assert_eq!(rows[2], "╰────────╯");
+    }
+
+    #[test]
+    fn double_top_border_with_single_sides() {
+        let rows = frame_rows(BorderStyle {
+            top: LineStyle::Double,
+            rounded_corners: true,
+            ..Default::default()
+        });
+        assert!(rows[0].starts_with('╒'), "{}", rows[0]);
+        assert!(rows[0].ends_with('╕'), "{}", rows[0]);
+        assert_eq!(rows[1], "││");
+        assert_eq!(rows[2], "╰────────╯");
+    }
+
+    #[test]
+    fn all_double_border() {
+        let rows = frame_rows(BorderStyle {
+            top: LineStyle::Double,
+            right: LineStyle::Double,
+            bottom: LineStyle::Double,
+            left: LineStyle::Double,
+            rounded_corners: true,
+        });
+        assert!(rows[0].starts_with('╔'), "{}", rows[0]);
+        assert!(rows[0].ends_with('╗'), "{}", rows[0]);
+        assert_eq!(rows[1], "║║");
+        assert_eq!(rows[2], "╚════════╝");
+    }
+
+    #[test]
+    fn heavy_and_double_corner_falls_back_to_the_horizontal_arm() {
+        let rows = frame_rows(BorderStyle {
+            top: LineStyle::Double,
+            right: LineStyle::Heavy,
+            bottom: LineStyle::Heavy,
+            left: LineStyle::Heavy,
+            rounded_corners: false,
+        });
+        assert!(rows[0].starts_with('╔'), "{}", rows[0]);
+        assert!(rows[0].ends_with('╗'), "{}", rows[0]);
+        assert_eq!(rows[1], "┃┃");
+        assert_eq!(rows[2], "┗━━━━━━━━┛");
+    }
+
+    #[test]
+    fn dashed_border_uses_light_corners() {
+        let rows = frame_rows(BorderStyle {
+            top: LineStyle::Dashed,
+            right: LineStyle::Dashed,
+            bottom: LineStyle::Dashed,
+            left: LineStyle::Dashed,
+            rounded_corners: false,
+        });
+        assert!(rows[0].starts_with('┌'), "{}", rows[0]);
+        assert_eq!(rows[1], "┆┆");
+        assert_eq!(rows[2], "└┄┄┄┄┄┄┄┄┘");
+    }
+
+    #[test]
+    fn help_text_full_includes_ctrl_scroll_when_enabled_for_tiled_pane() {
+        let frame = pane_frame_with(true, false, 80);
+        let (chars, _) = frame.help_text_version_full(80).unwrap();
+        let text = characters_to_string(&chars);
+        assert!(text.contains("Ctrl <MouseScroll>"));
+        assert!(text.contains("<drag borders>"));
+    }
+
+    #[test]
+    fn help_text_full_omits_ctrl_scroll_when_disabled_for_tiled_pane() {
+        let frame = pane_frame_with(false, false, 80);
+        let (chars, _) = frame.help_text_version_full(80).unwrap();
+        let text = characters_to_string(&chars);
+        assert!(!text.contains("MouseScroll"));
+        assert!(text.contains("<drag borders> to resize"));
+    }
+
+    #[test]
+    fn help_text_full_includes_ctrl_scroll_when_enabled_for_floating_pane() {
+        let frame = pane_frame_with(true, true, 80);
+        let (chars, _) = frame.help_text_version_full(80).unwrap();
+        let text = characters_to_string(&chars);
+        assert!(text.contains("Ctrl <MouseScroll>"));
+        assert!(text.contains("Ctrl <drag borders>"));
+    }
+
+    #[test]
+    fn help_text_full_omits_ctrl_scroll_when_disabled_for_floating_pane() {
+        let frame = pane_frame_with(false, true, 80);
+        let (chars, _) = frame.help_text_version_full(80).unwrap();
+        let text = characters_to_string(&chars);
+        assert!(!text.contains("MouseScroll"));
+        assert!(text.contains("Ctrl <drag borders> to resize"));
+    }
+
+    #[test]
+    fn help_text_medium_omits_ctrl_scroll_when_disabled() {
+        let frame = pane_frame_with(false, false, 40);
+        let (chars, _) = frame.help_text_version_medium(40).unwrap();
+        let text = characters_to_string(&chars);
+        assert!(!text.contains("MouseScroll"));
+        assert!(text.contains("<drag borders> resize"));
+    }
+
+    #[test]
+    fn help_text_short_omits_ctrl_scroll_when_disabled() {
+        let frame = pane_frame_with(false, false, 20);
+        let (chars, _) = frame.help_text_version_short(20).unwrap();
+        let text = characters_to_string(&chars);
+        assert!(!text.contains("MouseScroll"));
+        assert!(text.contains("<drag borders>"));
     }
 }

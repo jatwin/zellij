@@ -15,10 +15,18 @@ pub const DEFAULT_SCROLL_BUFFER_SIZE: usize = 10_000;
 pub static SCROLL_BUFFER_SIZE: OnceLock<usize> = OnceLock::new();
 pub static DEBUG_MODE: OnceLock<bool> = OnceLock::new();
 
+/// System-wide configuration directory, named after the running distribution
+/// (`/etc/zellij`, `C:\ProgramData\Zellij`)
 #[cfg(not(windows))]
-pub const SYSTEM_DEFAULT_CONFIG_DIR: &str = "/etc/zellij";
+pub fn system_default_config_dir() -> PathBuf {
+    PathBuf::from("/etc").join(crate::distribution::name())
+}
+
 #[cfg(windows)]
-pub const SYSTEM_DEFAULT_CONFIG_DIR: &str = "C:\\ProgramData\\Zellij";
+pub fn system_default_config_dir() -> PathBuf {
+    PathBuf::from("C:\\ProgramData").join(crate::distribution::display_name())
+}
+
 pub const SYSTEM_DEFAULT_DATA_DIR_PREFIX: &str = system_default_data_dir();
 
 pub static ZELLIJ_DEFAULT_THEMES: Dir = include_dir!("$CARGO_MANIFEST_DIR/assets/themes");
@@ -90,11 +98,18 @@ lazy_static! {
     pub static ref CLIENT_SERVER_CONTRACT_DIR: String =
         format!("contract_version_{}", CLIENT_SERVER_CONTRACT_VERSION);
     pub static ref ZELLIJ_PROJ_DIR: ProjectDirs = {
-        if cfg!(windows) {
-            ProjectDirs::from("", "", "Zellij").unwrap()
-        } else {
-            ProjectDirs::from("org", "Zellij Contributors", "Zellij").unwrap()
-        }
+        let (qualifier, organization, application) =
+            crate::distribution::distribution().project_dirs();
+        ProjectDirs::from(qualifier, organization, application).unwrap_or_else(|| {
+            panic!(
+                "could not determine the platform directories for distribution '{}' \
+                 (qualifier: {:?}, organization: {:?}, application: {:?})",
+                crate::distribution::name(),
+                qualifier,
+                organization,
+                application
+            )
+        })
     };
     pub static ref ZELLIJ_CACHE_DIR: PathBuf = ZELLIJ_PROJ_DIR.cache_dir().to_path_buf();
     pub static ref ZELLIJ_SESSION_CACHE_DIR: PathBuf = ZELLIJ_PROJ_DIR
@@ -116,71 +131,6 @@ pub const FEATURES: &[&str] = &[
     "disable_automatic_asset_installation",
 ];
 
-#[cfg(not(target_family = "wasm"))]
-pub use not_wasm::*;
-
-#[cfg(not(target_family = "wasm"))]
-mod not_wasm {
-    use lazy_static::lazy_static;
-    use std::collections::HashMap;
-    use std::path::PathBuf;
-
-    // Convenience macro to add plugins to the asset map (see `ASSET_MAP`)
-    //
-    // Plugins are taken from:
-    //
-    // - `zellij-utils/assets/plugins`: When building in release mode OR when the
-    //   `plugins_from_target` feature IS NOT set
-    // - `zellij-utils/../target/wasm32-wasip1/debug`: When building in debug mode AND the
-    //   `plugins_from_target` feature IS set
-    macro_rules! add_plugin {
-        ($assets:expr, $plugin:literal) => {
-            $assets.insert(
-                PathBuf::from("plugins").join($plugin),
-                #[cfg(any(not(feature = "plugins_from_target"), not(debug_assertions)))]
-                include_bytes!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/assets/plugins/",
-                    $plugin
-                ))
-                .to_vec(),
-                #[cfg(all(feature = "plugins_from_target", debug_assertions))]
-                include_bytes!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/../target/wasm32-wasip1/debug/",
-                    $plugin
-                ))
-                .to_vec(),
-            );
-        };
-    }
-
-    lazy_static! {
-        // Zellij asset map
-        pub static ref ASSET_MAP: HashMap<PathBuf, Vec<u8>> = {
-            let mut assets = std::collections::HashMap::new();
-            add_plugin!(assets, "compact-bar.wasm");
-            add_plugin!(assets, "status-bar.wasm");
-            add_plugin!(assets, "tab-bar.wasm");
-            add_plugin!(assets, "strider.wasm");
-            add_plugin!(assets, "session-manager.wasm");
-            add_plugin!(assets, "configuration.wasm");
-            add_plugin!(assets, "plugin-manager.wasm");
-            add_plugin!(assets, "about.wasm");
-            add_plugin!(assets, "share.wasm");
-            add_plugin!(assets, "multiple-select.wasm");
-            add_plugin!(assets, "layout-manager.wasm");
-            add_plugin!(assets, "link.wasm");
-            assets
-        };
-    }
-}
-
-/// Check if a filesystem entry is an IPC socket.
-///
-/// On Unix, this checks `FileTypeExt::is_socket()`. On non-Unix platforms,
-/// this checks `is_file()` to detect marker files created by `ipc_bind()`
-/// and `ipc_bind_async()` alongside kernel-level named pipes.
 #[cfg(unix)]
 pub fn is_ipc_socket(file_type: &std::fs::FileType) -> bool {
     use std::os::unix::fs::FileTypeExt;
@@ -192,10 +142,6 @@ pub fn is_ipc_socket(file_type: &std::fs::FileType) -> bool {
     file_type.is_file()
 }
 
-/// Connect to an IPC socket at the given path.
-///
-/// On Unix, this uses Unix domain sockets via `GenericFilePath`.
-/// On Windows, this uses named pipes via `GenericNamespaced`.
 #[cfg(unix)]
 pub fn ipc_connect(path: &std::path::Path) -> std::io::Result<interprocess::local_socket::Stream> {
     use interprocess::local_socket::{prelude::*, GenericFilePath, Stream as LocalSocketStream};
@@ -211,11 +157,6 @@ pub fn ipc_connect(path: &std::path::Path) -> std::io::Result<interprocess::loca
     LocalSocketStream::connect(ns_name)
 }
 
-/// Create an IPC listener bound to the given path.
-///
-/// On Unix, this uses Unix domain sockets via `GenericFilePath`.
-/// On Windows, this uses named pipes via `GenericNamespaced` and creates
-/// a marker file for session discovery.
 #[cfg(unix)]
 pub fn ipc_bind(path: &std::path::Path) -> std::io::Result<interprocess::local_socket::Listener> {
     use interprocess::local_socket::{prelude::*, GenericFilePath, ListenerOptions};
@@ -233,11 +174,6 @@ pub fn ipc_bind(path: &std::path::Path) -> std::io::Result<interprocess::local_s
     Ok(listener)
 }
 
-/// Create an async (tokio) IPC listener bound to the given path.
-///
-/// On Unix, this uses Unix domain sockets via `GenericFilePath`.
-/// On Windows, this uses named pipes via `GenericNamespaced` and creates
-/// a marker file for session discovery.
 #[cfg(unix)]
 pub fn ipc_bind_async(
     path: &std::path::Path,
@@ -259,9 +195,6 @@ pub fn ipc_bind_async(
     Ok(listener)
 }
 
-/// Connect to the reply pipe for a given IPC path (Windows only).
-///
-/// Uses `path-reply` as the named pipe for the server→client direction.
 #[cfg(windows)]
 pub fn ipc_connect_reply(
     path: &std::path::Path,
@@ -272,9 +205,6 @@ pub fn ipc_connect_reply(
     LocalSocketStream::connect(ns_name)
 }
 
-/// Create an IPC listener for the reply pipe (Windows only).
-///
-/// Binds to `path-reply` as the named pipe for the server→client direction.
 #[cfg(windows)]
 pub fn ipc_bind_reply(
     path: &std::path::Path,
@@ -297,12 +227,7 @@ mod unix_only {
     use nix::unistd::Uid;
     use std::env::temp_dir;
 
-    // Maximum length of a Unix domain socket path (from sockaddr_un.sun_path).
-    // macOS (and other BSDs) use 104, Linux/Android/Solaris use 108.
-    // The not(target_os = "macos") fallback of 108 is used for all other Unix
-    // platforms — this is correct for Linux/Android/Solaris and only 4 bytes
-    // over for BSDs, which would cause a slightly late error rather than a
-    // missed one.
+    // Maximum sockaddr_un.sun_path length: 104 on macOS/BSD, 108 on Linux/Android/Solaris.
     #[cfg(target_os = "macos")]
     pub const ZELLIJ_SOCK_MAX_LENGTH: usize = 104;
     #[cfg(not(target_os = "macos"))]
@@ -310,9 +235,12 @@ mod unix_only {
 
     lazy_static! {
         static ref UID: Uid = Uid::current();
-        pub static ref ZELLIJ_TMP_DIR: PathBuf = temp_dir().join(format!("zellij-{}", *UID));
-        pub static ref ZELLIJ_TMP_LOG_DIR: PathBuf = ZELLIJ_TMP_DIR.join("zellij-log");
-        pub static ref ZELLIJ_TMP_LOG_FILE: PathBuf = ZELLIJ_TMP_LOG_DIR.join("zellij.log");
+        pub static ref ZELLIJ_TMP_DIR: PathBuf =
+            temp_dir().join(format!("{}-{}", crate::distribution::name(), *UID));
+        pub static ref ZELLIJ_TMP_LOG_DIR: PathBuf =
+            ZELLIJ_TMP_DIR.join(format!("{}-log", crate::distribution::name()));
+        pub static ref ZELLIJ_TMP_LOG_FILE: PathBuf =
+            ZELLIJ_TMP_LOG_DIR.join(format!("{}.log", crate::distribution::name()));
         pub static ref ZELLIJ_SOCK_DIR: PathBuf = {
             let mut ipc_dir = envs::get_socket_dir().map_or_else(
                 |_| {
@@ -357,10 +285,12 @@ mod not_unix {
     lazy_static! {
         pub static ref ZELLIJ_TMP_DIR: PathBuf = {
             let tmp_dir = canonicalize_path(temp_dir());
-            tmp_dir.join("zellij")
+            tmp_dir.join(crate::distribution::name())
         };
-        pub static ref ZELLIJ_TMP_LOG_DIR: PathBuf = ZELLIJ_TMP_DIR.join("zellij-log");
-        pub static ref ZELLIJ_TMP_LOG_FILE: PathBuf = ZELLIJ_TMP_LOG_DIR.join("zellij.log");
+        pub static ref ZELLIJ_TMP_LOG_DIR: PathBuf =
+            ZELLIJ_TMP_DIR.join(format!("{}-log", crate::distribution::name()));
+        pub static ref ZELLIJ_TMP_LOG_FILE: PathBuf =
+            ZELLIJ_TMP_LOG_DIR.join(format!("{}.log", crate::distribution::name()));
         pub static ref ZELLIJ_SOCK_DIR: PathBuf = {
             let mut ipc_dir = canonicalize_path(envs::get_socket_dir().map_or_else(
                 |_| {

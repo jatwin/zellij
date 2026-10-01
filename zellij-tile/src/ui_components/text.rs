@@ -1,32 +1,52 @@
 use std::ops::Bound;
 use std::ops::RangeBounds;
+use zellij_utils::data::StyledText;
 
 #[derive(Debug, Default, Clone)]
 pub struct Text {
     text: String,
     selected: bool,
     opaque: bool,
+    disabled: bool,
     indices: Vec<Vec<usize>>,
 }
 
-impl Text {
-    pub fn new<S: AsRef<str>>(content: S) -> Self
-    where
-        S: ToString,
-    {
+impl From<StyledText> for Text {
+    fn from(styled_text: StyledText) -> Self {
         Text {
-            text: content.to_string(),
-            selected: false,
-            opaque: false,
-            indices: vec![],
+            text: styled_text.text,
+            indices: styled_text.indices,
+            ..Default::default()
         }
     }
+}
+
+impl From<String> for Text {
+    fn from(value: String) -> Self {
+        Text {
+            text: value,
+            ..Default::default()
+        }
+    }
+}
+
+impl From<&str> for Text {
+    fn from(value: &str) -> Self {
+        Text::from(value.to_owned())
+    }
+}
+
+impl Text {
     pub fn selected(mut self) -> Self {
         self.selected = true;
         self
     }
     pub fn opaque(mut self) -> Self {
         self.opaque = true;
+        self
+    }
+    pub fn disabled(mut self) -> Self {
+        self.disabled = true;
         self
     }
     pub fn dim_indices(mut self, mut indices: Vec<usize>) -> Self {
@@ -50,7 +70,7 @@ impl Text {
             Bound::Included(s) => *s + 1,
             Bound::Excluded(s) => *s,
         };
-        let indices = (start..end).into_iter();
+        let indices = start..end;
         self.indices
             .get_mut(DIM_LEVEL)
             .map(|i| i.append(&mut indices.into_iter().collect()));
@@ -93,7 +113,7 @@ impl Text {
             Bound::Included(s) => *s + 1,
             Bound::Excluded(s) => *s,
         };
-        let indices = (start..end).into_iter();
+        let indices = start..end;
         self.indices
             .get_mut(UNBOLD_LEVEL)
             .map(|i| i.append(&mut indices.into_iter().collect()));
@@ -136,7 +156,7 @@ impl Text {
             Bound::Included(s) => *s + 1,
             Bound::Excluded(s) => *s,
         };
-        let indices = (start..end).into_iter();
+        let indices = start..end;
         self.indices
             .get_mut(ERROR_COLOR_LEVEL)
             .map(|i| i.append(&mut indices.into_iter().collect()));
@@ -218,7 +238,7 @@ impl Text {
             Bound::Included(s) => *s + 1,
             Bound::Excluded(s) => *s,
         };
-        let indices = (start..end).into_iter();
+        let indices = start..end;
         self.indices
             .get_mut(SUCCESS_COLOR_LEVEL)
             .map(|i| i.append(&mut indices.into_iter().collect()));
@@ -298,7 +318,7 @@ impl Text {
             Bound::Included(s) => *s + 1,
             Bound::Excluded(s) => *s,
         };
-        let indices = (start..end).into_iter();
+        let indices = start..end;
         self.indices
             .get_mut(index_level)
             .map(|i| i.append(&mut indices.into_iter().collect()));
@@ -394,17 +414,24 @@ impl Text {
         let mut prefix = "".to_owned();
 
         if self.selected {
-            prefix = format!("x{}", prefix);
+            prefix.push('x');
         }
 
         if self.opaque {
-            prefix = format!("z{}", prefix);
+            prefix.push('z');
+        }
+
+        if self.disabled {
+            prefix.push('d');
         }
 
         format!("{}{}{}", prefix, indices, text)
     }
     pub fn len(&self) -> usize {
         self.text.chars().count()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
     }
 }
 
@@ -452,4 +479,54 @@ pub fn serialize_text_with_coordinates(
         height,
         text.serialize()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text_body(text: &str) -> String {
+        text.as_bytes()
+            .iter()
+            .map(|byte| byte.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    #[test]
+    fn from_str_equal_from_string() {
+        let from_str = Text::from("x").serialize();
+        let from_string = Text::from(String::from("x")).serialize();
+
+        assert_eq!(from_str, from_string);
+    }
+
+    #[test]
+    fn disabled_flag_serializes_with_a_d_prefix() {
+        let serialized = Text::from("x").disabled().serialize();
+        assert_eq!(serialized, format!("d{}", text_body("x")));
+    }
+
+    #[test]
+    fn opaque_and_disabled_serialize_in_push_order() {
+        let serialized = Text::from("x").disabled().opaque().serialize();
+        assert_eq!(serialized, format!("zd{}", text_body("x")));
+    }
+
+    #[test]
+    fn all_flags_serialize_in_selected_opaque_disabled_order() {
+        let serialized = Text::from("x").disabled().opaque().selected().serialize();
+        assert_eq!(serialized, format!("xzd{}", text_body("x")));
+    }
+
+    #[test]
+    fn flags_do_not_disturb_indices_or_text() {
+        let serialized = Text::from("Foo bar baz")
+            .disabled()
+            .color_indices(0, vec![0, 1, 2])
+            .serialize();
+        assert!(serialized.starts_with('d'));
+        assert!(serialized.contains("0,1,2$"));
+        assert!(serialized.ends_with(&text_body("Foo bar baz")));
+    }
 }
