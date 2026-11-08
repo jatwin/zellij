@@ -28,7 +28,7 @@
           src = ./.;
           cargoDeps = pkgs.rustPlatform.fetchCargoVendor {
             src = ./.;
-            hash = "sha256-6unom2zFwbFKHyjl9ETRMq7c+qtosgh+/1uLKCvo1WI=";
+            hash = "sha256-i3Vh7w9YeGUkGIsbqA2UIiLtMqsSC+/ehdSDIfTckM8=";
           };
           postInstall = ''
             installShellCompletion --cmd zellij \

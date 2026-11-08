@@ -6,7 +6,7 @@ use std::rc::Rc;
 use crate::active_component::{ActiveComponent, ClickAction};
 use crate::pages::{BulletinList, ComponentLine, Page, TextOrCustomRender};
 
-pub const MAX_TIP_INDEX: usize = 11;
+pub const MAX_TIP_INDEX: usize = crate::onboarding::LAST_ONBOARDING_TIP_INDEX;
 
 impl Page {
     pub fn new_tip_screen(
@@ -38,6 +38,16 @@ impl Page {
             Page::tip_11(link_executable)
         } else if tip_index == 11 {
             Page::tip_12(link_executable, base_mode)
+        } else if tip_index == crate::onboarding::DESKTOP_TIP_INDEX {
+            Page::tip_desktop_app()
+        } else if tip_index == crate::onboarding::DESKTOP_TIP_INDEX + 1 {
+            Page::tip_inbox_keys(base_mode)
+        } else if tip_index == crate::onboarding::DESKTOP_TIP_INDEX + 2 {
+            Page::tip_pane_controls(base_mode)
+        } else if tip_index == crate::onboarding::DESKTOP_TIP_INDEX + 3 {
+            Page::tip_run_notify()
+        } else if tip_index == crate::onboarding::DESKTOP_TIP_INDEX + 4 {
+            Page::tip_session_history(base_mode)
         } else {
             Page::tip_1(link_executable)
         }
@@ -553,12 +563,13 @@ impl Page {
             )
             .with_paragraph(vec![ComponentLine::new(vec![ActiveComponent::new(
                 TextOrCustomRender::Text(match *base_mode.borrow() {
-                    InputMode::Locked => Text::from("Check it out with with: Ctrl g + o + w")
-                        .color_range(3, 24..=29)
-                        .color_indices(3, vec![33, 37]),
-                    _ => Text::from("Check it out with with: Ctrl o + w")
-                        .color_range(3, 24..=29)
-                        .color_indices(3, vec![33]),
+                    InputMode::Locked => Text::from("Check it out with: Ctrl g + o + w")
+                        .color_substring(3, "Ctrl g")
+                        .color_nth_substring(3, "o", 1)
+                        .color_last_substring(3, "w"),
+                    _ => Text::from("Check it out with: Ctrl o + w")
+                        .color_substring(3, "Ctrl o")
+                        .color_last_substring(3, "w"),
                 }),
             )])])
             .with_paragraph(vec![ComponentLine::new(vec![ActiveComponent::new(
@@ -650,14 +661,15 @@ impl Page {
                     ActiveComponent::new(TextOrCustomRender::Text(
                             match *base_mode.borrow() {
                                 InputMode::Locked => {
-                                    Text::from("Check it out with with: Ctrl g + o + p")
-                                        .color_range(3, 24..=29)
-                                        .color_indices(3, vec![33, 37])
+                                    Text::from("Check it out with: Ctrl g + o + p")
+                                        .color_substring(3, "Ctrl g")
+                                        .color_nth_substring(3, "o", 1)
+                                        .color_last_substring(3, "p")
                                 },
                                 _ => {
-                                    Text::from("Check it out with with: Ctrl o + p")
-                                        .color_range(3, 24..=29)
-                                        .color_indices(3, vec![33])
+                                    Text::from("Check it out with: Ctrl o + p")
+                                        .color_substring(3, "Ctrl o")
+                                        .color_last_substring(3, "p")
                                 }
                             }
                     )),
